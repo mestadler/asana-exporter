@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+
+###############################################################
+### Import the modules and setup the parser for the cli options
+###############################################################
+
+
+import argparse
+import requests
+import json
+import sys
+import csv
+import re
+from tqdm import tqdm
+
+# Initialize argument parser and command-line options
+parser = argparse.ArgumentParser(description='Export Asana data to JSON or CSV.')
+parser.add_argument('--token', required=True, help='Your Asana Personal Access Token')
+parser.add_argument('--query', required=False, choices=['teams', 'projects'], help='Query for available teams or projects')
+parser.add_argument('--format', required=False, choices=['json', 'csv'], default='json', help='Export format: json or csv')
+parser.add_argument('--team_name', required=False, help='Name of the team you want to filter by')
+parser.add_argument('--project_name', required=False, help='Name of the project you want to filter by')
+
+# Parse command-line arguments
+args = parser.parse_args()
+
+# Initialize Asana API parameters
+personal_access_token = args.token
+export_format = args.format
+team_name_filter = args.team_name
+project_name_filter = args.project_name
+headers = {"Authorization": f"Bearer {personal_access_token}"}
+base_url = "https://app.asana.com/api/1.0/"
+
+##############################################################
+# Create the functions that will be used for this application
+##############################################################
+
+# Function to sanitize characters such as / or others
+def sanitize_filename(name):
+    return re.sub(r'[\\/:"*?<>|]+', '', name)
+
+
+# Function to fetch data from Asana API
+def fetch_from_asana(endpoint, params=None):
+    try:
+        response = requests.get(f"{base_url}{endpoint}", headers=headers, params=params)
+        response.raise_for_status()
+        return response.json()["data"]
+    except requests.RequestException as e:
+        print(f"Failed to fetch data from endpoint {endpoint}: {e}")
+        sys.exit(1)
+
+# Function to fetch all tasks of a project
+def fetch_all_tasks_of_project(project_gid):
+    tasks = fetch_from_asana(f"projects/{project_gid}/tasks")
+    for task in tqdm(tasks, desc=f"Fetching tasks for Project {project_gid}"):
+        task_gid = task['gid']
+        comments = fetch_from_asana(f"tasks/{task_gid}/stories")
+        task['comments'] = comments or []
+    return tasks
+
+# Function export the data
+def export_data(data, filename, export_format):
+    if export_format == 'json':
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=4)  # Pretty print
+    elif export_format == 'csv':
+        keys = data[0].keys()
+        with open(filename, 'w', newline='') as output_file:
+            dict_writer = csv.DictWriter(output_file, fieldnames=keys)
+            dict_writer.writeheader()
+            dict_writer.writerows(data)
+    else:
+        print("Unsupported export format.")
+
+###########################################################
+# Main execution to loop and use the functions for the app
+###########################################################
+
+# Initialize variables
+all_projects = []
+
+# Check what query the user wants to make
+if args.query == 'teams':
+    # Fetch workspace ID
+    workspaces = fetch_from_asana("workspaces")
+    workspace_id = workspaces[0]['gid']  # Assuming the first workspace is the one we want
+    # Fetch and list all teams
+    teams = fetch_from_asana(f"organizations/{workspace_id}/teams")
+    for team in teams:
+        print(team['name'])
+    sys.exit(0)  # Exit the program after listing
+
+elif args.query == 'projects':
+    # Fetch and list all projects
+    projects = fetch_from_asana("projects")
+    for project in projects:
+        print(project['name'])
+    sys.exit(0)  # Exit the program after listing
+
+if team_name_filter:
+    workspaces = fetch_from_asana("workspaces")
+    workspace_id = workspaces[0]['gid']
+    teams = fetch_from_asana(f"organizations/{workspace_id}/teams")
+    for team in teams:
+        if team['name'] == team_name_filter:
+            all_projects.extend(fetch_from_asana(f"teams/{team['gid']}/projects"))
+
+if project_name_filter:
+    all_projects = fetch_from_asana("projects")
+    all_projects = [p for p in all_projects if p['name'] == project_name_filter]
+    
+####################################################################
+# Now establish the base file name for the export
+####################################################################
+
+
+base_filename = 'asana_data'
+if project_name_filter:
+    base_filename = sanitize_filename(project_name_filter)
+elif team_name_filter:
+    base_filename = sanitize_filename(team_name_filter)
+else:
+    base_filename = 'asana_data'
+
+filename = f"{base_filename}.{export_format}"
+
+# Main loop to fetch tasks for each project
+all_data = []
+for project in tqdm(all_projects, desc='Fetching Projects'):
+    project_gid = project['gid']
+    tasks = fetch_all_tasks_of_project(project_gid)
+    all_data.extend(tasks)
+
+# Export the collected data,with sanitizing
+
+
+export_data(all_data, filename, export_format)
+print("Data exported successfully.")
+
